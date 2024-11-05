@@ -1,75 +1,46 @@
-## RAG Q&A Conversation With PDF Including Chat History
 import streamlit as st
-from langchain.chains import create_history_aware_retriever, create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_chroma import Chroma
-from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_groq import ChatGroq
-from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
-#from langchain.document_loaders import PDFMinerLoader
-#from langchain_community.document_loaders import PDFMinerLoader
-from langchain.globals import set_debug
-from langchain.llms import AzureOpenAI
-from langchain_openai import AzureChatOpenAI
+
+from langchain_openai import AzureChatOpenAI, AzureOpenAI
 from langchain_openai import AzureOpenAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_pinecone import PineconeVectorStore
+from pinecone import Pinecone
+
 import os
-import chromadb
-from dotenv import load_dotenv
 
-load_dotenv()
-
-set_debug(True)
-
-chromadb.api.client.SharedSystemClient.clear_system_cache()
 from dotenv import load_dotenv
 load_dotenv()
 
-os.environ['HF_TOKEN']=os.getenv("HF_TOKEN")
-#embeddings=HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 embeddings = AzureOpenAIEmbeddings(
     model="text-embedding-3-large",
-    azure_endpoint="",
-    api_key=""
+    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+    api_key=os.getenv("OPENAI_API_KEY")
+)
+
+## set up Streamlit 
+st.title("Auto Exam Evaluation using OpenAI")
+st.write("Please upload the relevant books of the Exam. It's recommended to upload multiple authors.")
+
+
+endpoint=os.getenv("AZURE_CHAT_OPENAI_ENDPOINT")
+key=os.getenv("OPENAI_API_KEY")
+llm = AzureChatOpenAI(
+    deployment_name="gpt-4o",
+    model_name="gpt-4o",
+    azure_endpoint=endpoint,
+    api_version="2023-03-15-preview",
+    openai_api_key=key,
 )
 
 
-## set up Streamlit 
-st.title("Conversational RAG With PDF uplaods and chat history")
-st.write("Upload Pdf's and chat with their content")
+uploaded_files=st.file_uploader("Choose A PDf file",type="pdf",accept_multiple_files=True)
 
-## Input the Groq API Key
-api_key=st.text_input("Enter your  API key:",type="password")
-
-endpoint=""
-key=""
-
-## Check if groq api key is provided
-if api_key:
-    #llm=ChatGroq(groq_api_key=api_key,model_name="Gemma2-9b-It")
-    llm = AzureChatOpenAI(
-        deployment_name="gpt-4o",
-        model_name="gpt-4o",
-        azure_endpoint=endpoint,
-        api_version="2023-03-15-preview",
-        openai_api_key=key,
-    )
-
-    ## chat interface
-
-    session_id=st.text_input("Session ID",value="default_session")
-    ## statefully manage chat history
-
-    if 'store' not in st.session_state:
-        st.session_state.store={}
-
-    uploaded_files=st.file_uploader("Choose A PDf file",type="pdf",accept_multiple_files=True)
-    ## Process uploaded  PDF's
-    if uploaded_files:
+if uploaded_files:
         documents=[]
         for uploaded_file in uploaded_files:
             temppdf=f"./temp.pdf"
@@ -83,76 +54,60 @@ if api_key:
 
     # Split and create embeddings for the documents
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
-        splits = text_splitter.split_documents(documents)
-        vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
-        retriever = vectorstore.as_retriever() 
+        splits = text_splitter.split_documents(documents) 
 
-        vectorstore.similarity_search
+        index_name = os.getenv("PINECONE_INDEX") # put in the name of your pinecone index here
 
-
-        contextualize_q_system_prompt=(
-            "Given a chat history and the latest user question"
-            "which might reference context in the chat history, "
-            "formulate a standalone question which can be understood "
-            "without the chat history. Do NOT answer the question, "
-            "just reformulate it if needed and otherwise return it as is."
-        )
-        contextualize_q_prompt = ChatPromptTemplate.from_messages(
-                [
-                    ("system", contextualize_q_system_prompt),
-                    MessagesPlaceholder("chat_history"),
-                    ("human", "{input}"),
-                ]
-            )
-        
-        history_aware_retriever=create_history_aware_retriever(llm,retriever,contextualize_q_prompt)
-
-        ## Answer question
-
-        # Answer question
-        system_prompt = (
-                "You are an assistant for question-answering tasks. "
-                "Use the following pieces of retrieved context to answer "
-                "the question. If you don't know the answer, say that you "
-                "don't know. Use three sentences maximum and keep the "
-                "answer concise."
-                "\n\n"
-                "{context}"
-            )
-        qa_prompt = ChatPromptTemplate.from_messages(
-                [
-                    ("system", system_prompt),
-                    MessagesPlaceholder("chat_history"),
-                    ("human", "{input}"),
-                ]
-            )
-        
-        question_answer_chain=create_stuff_documents_chain(llm,qa_prompt)
-        rag_chain=create_retrieval_chain(history_aware_retriever,question_answer_chain)
-
-        def get_session_history(session:str)->BaseChatMessageHistory:
-            if session_id not in st.session_state.store:
-                st.session_state.store[session_id]=ChatMessageHistory()
-            return st.session_state.store[session_id]
-        
-        conversational_rag_chain=RunnableWithMessageHistory(
-            rag_chain,get_session_history,
-            input_messages_key="input",
-            history_messages_key="chat_history",
-            output_messages_key="answer"
+        pc = Pinecone(
+        api_key = os.getenv("PINECONE_API_KEY"),
         )
 
-        user_input = st.text_input("Your question:")
-        if user_input:
-            session_history=get_session_history(session_id)
-            response = conversational_rag_chain.invoke(
-                {"input": user_input},
-                config={
-                    "configurable": {"session_id":session_id}
-                },  # constructs a key "abc123" in `store`.
-            )
-            st.write(st.session_state.store)
-            st.write("Assistant:", response['answer'])
-            st.write("Chat History:", session_history.messages)
-else:
-    st.warning("Please enter the GRoq API Key")
+        pc.list_indexes().names() # to check if my index exsist
+        index = pc.Index(index_name)
+        index.describe_index_stats()
+
+        vectorstore = PineconeVectorStore(pinecone_api_key = os.getenv("PINECONE_API_KEY"), index_name= index_name, embedding=embeddings, index= index)
+
+        vectorstore.add_texts(texts=[t.page_content for t in splits])
+        retriever = vectorstore.as_retriever()
+
+        true_answer_prompt = """
+        You are a teacher. You will answer the following question. The points that should be present in your answer is present in the context provided. You must strictly follow it. You should not give the answer outside the context. However, You have to elaborate the points with your own understanding. You have to answer the question pointwise.
+
+        Question: {question} 
+        Context: {context} 
+        Answer:
+        """
+
+        true_answer_generator = ChatPromptTemplate.from_messages([
+        ("human",true_answer_prompt),
+        ])
+
+        def format_docs(docs):
+            return "\n\n".join(doc.page_content for doc in docs)
+
+
+        rag_chain = (
+            {"context": retriever | format_docs, "question": RunnablePassthrough()}
+            | true_answer_generator
+            | llm
+            | StrOutputParser()
+        )
+
+        question = st.text_input("Enter the question along with the Q No. and the Marks:")
+        if question:
+            true_answer = rag_chain.invoke(question)
+            st.write("Assistant:", true_answer)
+
+            student_answer = st.text_input("Enter the Student's Answer: ")
+            if student_answer:
+                answer_evaluation_prompt = f"""
+                You are a teacher who will evaluate and grade an exam. You are given a question and the student's answer. You have to evaluate the answer with respect to the true answer and give marks as per the relevance to the true answer.
+
+                Question: {question} 
+                Student's answer: {student_answer} 
+                True Answer: {true_answer}
+                Answer:
+                """
+                evaluation=llm.invoke(answer_evaluation_prompt)
+                st.write("Student's Answer Evaluation:", evaluation.content)
