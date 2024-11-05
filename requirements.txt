@@ -1,0 +1,9 @@
+langchain
+langchain-community
+langchain-core
+langchain-openai
+pypdf
+pinecone
+langchain-pinecone
+pinecone-client
+ipykernel
